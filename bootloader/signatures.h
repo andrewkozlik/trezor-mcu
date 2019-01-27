@@ -20,9 +20,12 @@
 #ifndef __SIGNATURES_H__
 #define __SIGNATURES_H__
 
+#include <stdint.h>
+
 #define SIG_OK      0x5A3CA5C3
 #define SIG_FAIL    0x00000000
 
-int signatures_ok(uint8_t *store_hash);
+void compute_firmware_hash(uint8_t hash[32], const uint32_t codelen, const void *drybuf, const uint32_t drybuf_size);
+int signatures_ok(uint8_t store_hash[32], const void *drybuf, const uint32_t drybuf_size);
 
 #endif

@@ -34,12 +34,11 @@
 #include "ecdsa.h"
 #include "secp256k1.h"
 #include "memzero.h"
+#include "memory.h"
 
 #include "usb21_standard.h"
 #include "webusb.h"
 #include "winusb.h"
-
-#define FIRMWARE_MAGIC "TRZR"
 
 #define USB_INTERFACE_INDEX_MAIN 0
 
@@ -135,7 +134,8 @@ static uint8_t flash_anim = 0;
 static uint16_t msg_id = 0xFFFF;
 static uint32_t msg_size = 0;
 
-static uint8_t meta_backup[FLASH_META_LEN];
+#define FW_DRYFLASH_LEN 1024
+static uint32_t FW_DRYFLASH_BUF[FW_DRYFLASH_LEN]; // 4K
 
 static void send_msg_success(usbd_device *dev)
 {
@@ -239,21 +239,6 @@ static void send_msg_buttonrequest_firmwarecheck(usbd_device *dev)
 		, 64) != 64) {}
 }
 
-static void backup_metadata(uint8_t *backup)
-{
-	memcpy(backup, FLASH_PTR(FLASH_META_START), FLASH_META_LEN);
-}
-
-static void restore_metadata(const uint8_t *backup)
-{
-	flash_unlock();
-	for (int i = 0; i < FLASH_META_LEN / 4; i++) {
-		const uint32_t *w = (const uint32_t *)(backup + i * 4);
-		flash_program_word(FLASH_META_START + i * 4, *w);
-	}
-	flash_lock();
-}
-
 static void rx_callback(usbd_device *dev, uint8_t ep)
 {
 	(void)ep;
@@ -301,13 +286,13 @@ static void rx_callback(usbd_device *dev, uint8_t ep)
 				flash_clear_status_flags();
 				flash_unlock();
 				// erase metadata area
-				for (int i = FLASH_META_SECTOR_FIRST; i <= FLASH_META_SECTOR_LAST; i++) {
-					layoutProgress("PREPARING ... Please wait", 1000 * (i - FLASH_META_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_META_SECTOR_FIRST));
+				for (int i = FLASH_STORAGE_SECTOR_FIRST; i <= FLASH_STORAGE_SECTOR_LAST; i++) {
+					layoutProgress("WIPING ... Please wait", 1000 * (i - FLASH_STORAGE_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_STORAGE_SECTOR_FIRST));
 					flash_erase_sector(i, FLASH_CR_PROGRAM_X32);
 				}
 				// erase code area
 				for (int i = FLASH_CODE_SECTOR_FIRST; i <= FLASH_CODE_SECTOR_LAST; i++) {
-					layoutProgress("PREPARING ... Please wait", 1000 * (i - FLASH_META_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_META_SECTOR_FIRST));
+					layoutProgress("WIPING ... Please wait", 1000 * (i - FLASH_STORAGE_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_STORAGE_SECTOR_FIRST));
 					flash_erase_sector(i, FLASH_CR_PROGRAM_X32);
 				}
 				flash_wait_for_last_operation();
@@ -335,42 +320,22 @@ static void rx_callback(usbd_device *dev, uint8_t ep)
 			}
 			if (brand_new_firmware || button.YesUp) {
 				// check whether current firmware is signed
-				if (!brand_new_firmware && SIG_OK == signatures_ok(NULL)) {
+				if (!brand_new_firmware && SIG_OK == signatures_ok(NULL, NULL, 0)) {
 					old_was_unsigned = false;
-					// backup metadata
-					backup_metadata(meta_backup);
 				} else {
 					old_was_unsigned = true;
 				}
+				// erase code area
 				flash_wait_for_last_operation();
 				flash_clear_status_flags();
 				flash_unlock();
-				// erase metadata area
-				for (int i = FLASH_META_SECTOR_FIRST; i <= FLASH_META_SECTOR_LAST; i++) {
-					layoutProgress("PREPARING ... Please wait", 1000 * (i - FLASH_META_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_META_SECTOR_FIRST));
-					flash_erase_sector(i, FLASH_CR_PROGRAM_X32);
-				}
-				// erase code area
 				for (int i = FLASH_CODE_SECTOR_FIRST; i <= FLASH_CODE_SECTOR_LAST; i++) {
-					layoutProgress("PREPARING ... Please wait", 1000 * (i - FLASH_META_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_META_SECTOR_FIRST));
+					layoutProgress("PREPARING ... Please wait", 1000 * (i - FLASH_STORAGE_SECTOR_FIRST) / (FLASH_CODE_SECTOR_LAST - FLASH_STORAGE_SECTOR_FIRST));
 					flash_erase_sector(i, FLASH_CR_PROGRAM_X32);
 				}
 				layoutProgress("INSTALLING ... Please wait", 0);
 				flash_wait_for_last_operation();
 				flash_lock();
-
-				// check that metadata was succesfully erased
-				// flash status register should show now error and
-				// the config block should contain only \xff.
-				uint8_t hash[32];
-				sha256_Raw(FLASH_PTR(FLASH_META_START), FLASH_META_LEN, hash);
-				if ((FLASH_SR & (FLASH_SR_PGAERR | FLASH_SR_PGPERR | FLASH_SR_PGSERR | FLASH_SR_WRPERR)) != 0
-					|| memcmp(hash, "\x2d\x86\x4c\x0b\x78\x9a\x43\x21\x4e\xee\x85\x24\xd3\x18\x20\x75\x12\x5e\x5c\xa2\xcd\x52\x7f\x35\x82\xec\x87\xff\xd9\x40\x76\xbc", 32) != 0) {
-					send_msg_failure(dev);
-					flash_state = STATE_END;
-					layoutDialog(&bmp_icon_error, NULL, NULL, NULL, "Error installing ", "firmware.", NULL, "Unplug your TREZOR", "and try again.", NULL);
-					return;
-				}
 
 				send_msg_success(dev);
 				flash_state = STATE_FLASHSTART;
@@ -393,37 +358,41 @@ static void rx_callback(usbd_device *dev, uint8_t ep)
 				return;
 			}
 			// read payload length
-			uint8_t *p = buf + 10;
+			const uint8_t *p = buf + 10;
 			flash_len = readprotobufint(&p);
-			if (flash_len > FLASH_TOTAL_SIZE + FLASH_META_DESC_LEN - (FLASH_APP_START - FLASH_ORIGIN)) { // firmware is too big
+			if (flash_len > FLASH_FWHEADER_LEN + FLASH_APP_LEN) { // firmware is too big
 				send_msg_failure(dev);
 				flash_state = STATE_END;
 				layoutDialog(&bmp_icon_error, NULL, NULL, NULL, "Firmware is too big.", NULL, "Get official firmware", "from trezor.io/start", NULL, NULL);
 				return;
 			}
 			// check firmware magic
-			if (memcmp(p, FIRMWARE_MAGIC, 4) != 0) {
+			if (memcmp(p, &FIRMWARE_MAGIC, 4) != 0) {
 				send_msg_failure(dev);
 				flash_state = STATE_END;
 				layoutDialog(&bmp_icon_error, NULL, NULL, NULL, "Wrong firmware header.", NULL, "Get official firmware", "from trezor.io/start", NULL, NULL);
 				return;
 			}
 			flash_state = STATE_FLASHING;
-			p += 4;         // Don't flash firmware header yet.
+			memzero(FW_DRYFLASH_BUF, sizeof(FW_DRYFLASH_BUF));
+			p += 4;         // Don't flash the firmware magic yet
 			flash_pos = 4;
 			wi = 0;
+			flash_wait_for_last_operation();
+			flash_clear_status_flags();
 			flash_unlock();
 			while (p < buf + 64) {
 				towrite[wi] = *p;
 				wi++;
 				if (wi == 4) {
 					const uint32_t *w = (uint32_t *)towrite;
-					flash_program_word(FLASH_META_START + flash_pos, *w);
+					flash_program_word(FLASH_FWHEADER_START + flash_pos, *w);
 					flash_pos += 4;
 					wi = 0;
 				}
 				p++;
 			}
+			flash_wait_for_last_operation();
 			flash_lock();
 			return;
 		}
@@ -439,25 +408,36 @@ static void rx_callback(usbd_device *dev, uint8_t ep)
 		}
 		const uint8_t *p = buf + 1;
 		if (flash_anim % 32 == 4) {
-			layoutProgress("INSTALLING ... Please wait", 1000 * flash_pos / flash_len);
+			// layoutProgress("INSTALLING ... Please wait", 1000 * flash_pos / flash_len);
+			char str[20];
+			memzero(str, sizeof(str));
+			uint32hex(flash_pos, str);
+			str[8] = ' ';
+			uint32hex(flash_len, str + 9);
+			layoutProgress(str, 1000 * flash_pos / flash_len);
 		}
 		flash_anim++;
+
+		flash_wait_for_last_operation();
+		flash_clear_status_flags();
 		flash_unlock();
 		while (p < buf + 64 && flash_pos < flash_len) {
 			towrite[wi] = *p;
 			wi++;
 			if (wi == 4) {
 				const uint32_t *w = (const uint32_t *)towrite;
-				if (flash_pos < FLASH_META_DESC_LEN) {
-					flash_program_word(FLASH_META_START + flash_pos, *w);			// the first 256 bytes of firmware is metadata descriptor
+				if ((flash_pos >= FLASH_FWHEADER_LEN) && (flash_pos < (FLASH_FWHEADER_LEN + sizeof(FW_DRYFLASH_BUF)))) {
+					// store first 4K of the code in DRYFLASH buffer
+					FW_DRYFLASH_BUF[(flash_pos - FLASH_FWHEADER_LEN) / sizeof(uint32_t)] = *w;
 				} else {
-					flash_program_word(FLASH_APP_START + (flash_pos - FLASH_META_DESC_LEN), *w);	// the rest is code
+					flash_program_word(FLASH_FWHEADER_START + flash_pos, *w);
 				}
 				flash_pos += 4;
 				wi = 0;
 			}
 			p++;
 		}
+		flash_wait_for_last_operation();
 		flash_lock();
 		// flashing done
 		if (flash_pos == flash_len) {
@@ -477,8 +457,9 @@ static void rx_callback(usbd_device *dev, uint8_t ep)
 			if (msg_id != 0x001B) {	// ButtonAck message (id 27)
 				return;
 			}
+			// compute hash by combining DRYFLASH and flashed APP
 			uint8_t hash[32];
-			sha256_Raw(FLASH_PTR(FLASH_APP_START), flash_len - FLASH_META_DESC_LEN, hash);
+			compute_firmware_hash(hash, flash_len - FLASH_FWHEADER_LEN, FW_DRYFLASH_BUF, sizeof(FW_DRYFLASH_BUF));
 			layoutFirmwareHash(hash);
 			do {
 				delay(100000);
@@ -489,27 +470,46 @@ static void rx_callback(usbd_device *dev, uint8_t ep)
 		bool hash_check_ok = brand_new_firmware || button.YesUp;
 
 		layoutProgress("INSTALLING ... Please wait", 1000);
-		uint8_t flags = *FLASH_PTR(FLASH_META_FLAGS);
+		uint8_t flags = *FLASH_PTR(FLASH_FWHEADER_FLAGS);
 		// wipe storage if:
 		// 0) there was no firmware
 		// 1) old firmware was unsigned
 		// 2) firmware restore flag isn't set
 		// 3) signatures are not ok
-		if (brand_new_firmware || old_was_unsigned || (flags & 0x01) == 0 || SIG_OK != signatures_ok(NULL)) {
-			memzero(meta_backup, sizeof(meta_backup));
+		if (brand_new_firmware || old_was_unsigned || (flags & 0x01) == 0 || SIG_OK != signatures_ok(NULL, FW_DRYFLASH_BUF, sizeof(FW_DRYFLASH_BUF))) {
+			flash_wait_for_last_operation();
+			flash_clear_status_flags();
+			flash_unlock();
+			// erase storage
+			for (int i = FLASH_STORAGE_SECTOR_FIRST; i <= FLASH_STORAGE_SECTOR_LAST; i++) {
+				flash_erase_sector(i, FLASH_CR_PROGRAM_X32);
+			}
+			// check erasure
+			uint8_t hash[32];
+			sha256_Raw(FLASH_PTR(FLASH_STORAGE_START), FLASH_STORAGE_LEN, hash);
+			if ((FLASH_SR & (FLASH_SR_PGAERR | FLASH_SR_PGPERR | FLASH_SR_PGSERR | FLASH_SR_WRPERR)) != 0
+				|| memcmp(hash, "\x2d\x86\x4c\x0b\x78\x9a\x43\x21\x4e\xee\x85\x24\xd3\x18\x20\x75\x12\x5e\x5c\xa2\xcd\x52\x7f\x35\x82\xec\x87\xff\xd9\x40\x76\xbc", 32) != 0) {
+				send_msg_failure(dev);
+				flash_state = STATE_END;
+				layoutDialog(&bmp_icon_error, NULL, NULL, NULL, "Error installing ", "firmware.", NULL, "Unplug your TREZOR", "and try again.", NULL);
+				flash_wait_for_last_operation();
+				flash_lock();
+				return;
+			}
+
 		}
-		// copy new firmware header
-		memcpy(meta_backup, (void *)FLASH_META_START, FLASH_META_DESC_LEN);
 		// write "TRZR" in header only when hash was confirmed
 		if (hash_check_ok) {
-			memcpy(meta_backup, FIRMWARE_MAGIC, 4);
+			flash_program_word(FLASH_FWHEADER_START, FIRMWARE_MAGIC);
+			// copy DRYFLASH to flash
+			for (int i = 0; i < 1024; i++) {
+				flash_program_word(FLASH_APP_START, FW_DRYFLASH_BUF[i]);
+			}
 		} else {
-			memzero(meta_backup, 4);
+			flash_program_word(FLASH_FWHEADER_START, 0x00000000);
 		}
-
-		// no need to erase, because we are not changing any already flashed byte.
-		restore_metadata(meta_backup);
-		memzero(meta_backup, sizeof(meta_backup));
+		flash_wait_for_last_operation();
+		flash_lock();
 
 		flash_state = STATE_END;
 		if (hash_check_ok) {

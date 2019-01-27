@@ -33,6 +33,9 @@
 #include "layout.h"
 #include "rng.h"
 #include "timer.h"
+#include "memory.h"
+
+const uint32_t FIRMWARE_MAGIC = 0x525a5254; // TRZR
 
 void layoutFirmwareHash(const uint8_t *hash)
 {
@@ -87,13 +90,13 @@ void __attribute__((noreturn)) load_app(int signed_firmware)
 bool firmware_present(void)
 {
 #ifndef APPVER
-	if (memcmp(FLASH_PTR(FLASH_META_MAGIC), "TRZR", 4)) { // magic does not match
+	if (memcmp(FLASH_PTR(FLASH_FWHEADER_MAGIC), &FIRMWARE_MAGIC, 4)) { // magic does not match
 		return false;
 	}
-	if (*((const uint32_t *)FLASH_PTR(FLASH_META_CODELEN)) < 4096) { // firmware reports smaller size than 4kB
+	if (*((const uint32_t *)FLASH_PTR(FLASH_FWHEADER_CODELEN)) < 8192) { // firmware reports smaller size than 8kB
 		return false;
 	}
-	if (*((const uint32_t *)FLASH_PTR(FLASH_META_CODELEN)) > FLASH_TOTAL_SIZE - (FLASH_APP_START - FLASH_ORIGIN)) { // firmware reports bigger size than flash size
+	if (*((const uint32_t *)FLASH_PTR(FLASH_FWHEADER_CODELEN)) > FLASH_APP_LEN) { // firmware reports bigger size than flash size
 		return false;
 	}
 #endif
@@ -141,7 +144,7 @@ int main(void)
 		oledRefresh();
 
 		uint8_t hash[32];
-		int signed_firmware = signatures_ok(hash);
+		int signed_firmware = signatures_ok(hash, NULL, 0);
 		if (SIG_OK != signed_firmware) {
 			show_unofficial_warning(hash);
 			timer_init();

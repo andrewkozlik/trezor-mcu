@@ -86,7 +86,7 @@ be added to the storage u2f_counter to get the real counter value.
 
  */
 
-#define FLASH_STORAGE_PINAREA     (FLASH_META_START + 0x4000)
+#define FLASH_STORAGE_PINAREA     (FLASH_STORAGE_START + 0x4000)
 #define FLASH_STORAGE_PINAREA_LEN (0x1000)
 #define FLASH_STORAGE_U2FAREA     (FLASH_STORAGE_PINAREA + FLASH_STORAGE_PINAREA_LEN)
 #define FLASH_STORAGE_U2FAREA_LEN (0x100)
@@ -199,7 +199,7 @@ bool storage_from_flash(void)
 		}
 		svc_flash_unlock();
 		// erase extra storage sector
-		svc_flash_erase_sector(FLASH_META_SECTOR_LAST);
+		svc_flash_erase_sector(FLASH_STORAGE_SECTOR_LAST);
 		svc_flash_program(FLASH_CR_PROGRAM_X32);
 		flash_write32(FLASH_STORAGE_PINAREA, 0xffffffff << pinctr);
 		// storageRom.has_pin_failed_attempts and storageRom.pin_failed_attempts
@@ -359,19 +359,12 @@ static void storage_commit_locked(bool update)
 		}
 	}
 
-	// backup meta
-	uint32_t meta_backup[FLASH_META_DESC_LEN / sizeof(uint32_t)];
-	memcpy(meta_backup, FLASH_PTR(FLASH_META_START), FLASH_META_DESC_LEN);
-
 	// erase storage
-	svc_flash_erase_sector(FLASH_META_SECTOR_FIRST);
+	svc_flash_erase_sector(FLASH_STORAGE_SECTOR_FIRST);
 	svc_flash_program(FLASH_CR_PROGRAM_X32);
 
-	// copy meta back
-	uint32_t flash = FLASH_META_START;
-	flash = storage_flash_words(flash, meta_backup, FLASH_META_DESC_LEN / sizeof(uint32_t));
-
 	// copy storage
+	uint32_t flash = FLASH_STORAGE_START;
 	flash = storage_flash_words(flash, &storage_magic, sizeof(storage_magic) / sizeof(uint32_t));
 	flash = storage_flash_words(flash, storage_uuid, sizeof(storage_uuid) / sizeof(uint32_t));
 
@@ -743,7 +736,7 @@ bool session_isPinCached(void)
 void storage_clearPinArea(void)
 {
 	svc_flash_unlock();
-	svc_flash_erase_sector(FLASH_META_SECTOR_LAST);
+	svc_flash_erase_sector(FLASH_STORAGE_SECTOR_LAST);
 	storage_check_flash_errors(svc_flash_lock());
 	storage_u2f_offset = 0;
 }
@@ -760,7 +753,7 @@ static void storage_area_recycle(uint32_t new_pinfails)
 	}
 
 	// erase pinarea/u2f sector
-	svc_flash_erase_sector(FLASH_META_SECTOR_LAST);
+	svc_flash_erase_sector(FLASH_STORAGE_SECTOR_LAST);
 	flash_write32(FLASH_STORAGE_PINAREA, new_pinfails);
 	if (*(const volatile uint32_t *)FLASH_PTR(FLASH_STORAGE_PINAREA) != new_pinfails) {
 		storage_show_error();

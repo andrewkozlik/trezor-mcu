@@ -1,4 +1,4 @@
-APPVER = 1.0.0
+APPVER = 1.8.0
 
 NAME  = trezor
 

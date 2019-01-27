@@ -17,7 +17,6 @@
  * along with this library.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdint.h>
 #include <string.h>
 
 #include "signatures.h"
@@ -25,6 +24,7 @@
 #include "secp256k1.h"
 #include "sha2.h"
 #include "bootloader.h"
+#include "memory.h"
 
 #define PUBKEYS 5
 
@@ -38,15 +38,29 @@ static const uint8_t * const pubkey[PUBKEYS] = {
 
 #define SIGNATURES 3
 
-int signatures_ok(uint8_t *store_hash)
+void compute_firmware_hash(uint8_t hash[32], const uint32_t codelen, const void *drybuf, const uint32_t drybuf_size)
 {
-	const uint32_t codelen = *((const uint32_t *)FLASH_META_CODELEN);
-	const uint8_t sigindex1 = *((const uint8_t *)FLASH_META_SIGINDEX1);
-	const uint8_t sigindex2 = *((const uint8_t *)FLASH_META_SIGINDEX2);
-	const uint8_t sigindex3 = *((const uint8_t *)FLASH_META_SIGINDEX3);
+	if (!drybuf || drybuf_size > codelen) {
+		sha256_Raw(FLASH_PTR(FLASH_APP_START), codelen, hash);
+	} else {
+		SHA256_CTX ctx;
+		sha256_Init(&ctx);
+		sha256_Update(&ctx, drybuf, drybuf_size);
+		sha256_Update(&ctx, FLASH_PTR(FLASH_APP_START) + drybuf_size, codelen - drybuf_size);
+		sha256_Final(&ctx, hash);
+	}
+}
+
+int signatures_ok(uint8_t store_hash[32], const void *drybuf, const uint32_t drybuf_size)
+{
+	const uint32_t codelen = *((const uint32_t *)FLASH_FWHEADER_CODELEN);
+	const uint8_t sigindex1 = *((const uint8_t *)FLASH_FWHEADER_SIGINDEX1);
+	const uint8_t sigindex2 = *((const uint8_t *)FLASH_FWHEADER_SIGINDEX2);
+	const uint8_t sigindex3 = *((const uint8_t *)FLASH_FWHEADER_SIGINDEX3);
 
 	uint8_t hash[32];
-	sha256_Raw((const uint8_t *)FLASH_APP_START, codelen, hash);
+	compute_firmware_hash(hash, codelen, drybuf, drybuf_size);
+
 	if (store_hash) {
 		memcpy(store_hash, hash, 32);
 	}
@@ -59,13 +73,13 @@ int signatures_ok(uint8_t *store_hash)
 	if (sigindex1 == sigindex3) return SIG_FAIL; // duplicate use
 	if (sigindex2 == sigindex3) return SIG_FAIL; // duplicate use
 
-	if (0 != ecdsa_verify_digest(&secp256k1, pubkey[sigindex1 - 1], (const uint8_t *)FLASH_META_SIG1, hash)) { // failure
+	if (0 != ecdsa_verify_digest(&secp256k1, pubkey[sigindex1 - 1], (const uint8_t *)FLASH_FWHEADER_SIG1, hash)) { // failure
 		return SIG_FAIL;
 	}
-	if (0 != ecdsa_verify_digest(&secp256k1, pubkey[sigindex2 - 1], (const uint8_t *)FLASH_META_SIG2, hash)) { // failure
+	if (0 != ecdsa_verify_digest(&secp256k1, pubkey[sigindex2 - 1], (const uint8_t *)FLASH_FWHEADER_SIG2, hash)) { // failure
 		return SIG_FAIL;
 	}
-	if (0 != ecdsa_verify_digest(&secp256k1, pubkey[sigindex3 - 1], (const uint8_t *)FLASH_META_SIG3, hash)) { // failture
+	if (0 != ecdsa_verify_digest(&secp256k1, pubkey[sigindex3 - 1], (const uint8_t *)FLASH_FWHEADER_SIG3, hash)) { // failture
 		return SIG_FAIL;
 	}
 
